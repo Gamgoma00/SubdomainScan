@@ -1,4 +1,4 @@
-# SubdomainScam
+# SubdomainScan
 This Python script is designed to scan for valid subdomains of a given domain
 It works as follows:
 
