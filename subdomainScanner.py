@@ -25,7 +25,7 @@ RESET = '\033[0m'
 
 class SubdomainScanner:
     def __init__(self, domain: str, wordlist: str, threads: int = 50, timeout: int = 3):
-        self.domain = domain
+        self.domain = domain.strip().lower()
         self.wordlist = wordlist
         self.threads = threads
         self.timeout = timeout
@@ -39,21 +39,33 @@ class SubdomainScanner:
 
     def load_wordlist(self) -> List[str]:
         try:
-            with open(self.wordlist, 'r') as f:
-                return [line.strip() for line in f if line.strip()]
+            # Open with errors='ignore' to gracefully bypass non-UTF-8 bytes found in lists like rockyou
+            with open(self.wordlist, 'r', errors='ignore') as f:
+                subdomains = []
+                for line in f:
+                    cleaned = line.strip().lower()
+                    # Skip empty lines, comment lines, or invalid prefixes
+                    if not cleaned or cleaned.startswith('#') or cleaned.startswith('.'):
+                        continue
+                    subdomains.append(cleaned)
+                return subdomains
         except FileNotFoundError:
             print(f"{RED}[!] Error: Wordlist '{self.wordlist}' not found.{RESET}")
             sys.exit(1)
 
     def check_subdomain(self, sub_prefix: str, protocol: str) -> Tuple[str, bool, str, str]:
+        # Extra layer of defense against malformed IDNA labels
+        if not sub_prefix or sub_prefix.startswith('.') or ' ' in sub_prefix:
+            return (f"{protocol}://{sub_prefix}.{self.domain}", False, "Invalid Input", "N/A")
+
         hostname = f"{sub_prefix}.{self.domain}"
         url = f"{protocol}://{hostname}"
         ip_address = "N/A"
         
-        # Phase 1: Fast DNS Resolution to avoid wasteful HTTP timeouts on dead records
+        # Phase 1: Fast DNS Resolution with catch-all Unicode/IDNA Error Handling
         try:
             ip_address = socket.gethostbyname(hostname)
-        except socket.gaierror:
+        except (socket.gaierror, UnicodeEncodeError):
             return (url, False, "DNS NotFound", ip_address)
 
         # Phase 2: Active HTTP status interrogation for verified DNS targets
@@ -64,7 +76,6 @@ class SubdomainScanner:
                 allow_redirects=False,
                 verify=False
             )
-            # Accept all non-404 status codes as live (including 403, 500, etc.)
             if response.status_code != 404:
                 return (url, True, str(response.status_code), ip_address)
             return (url, False, "404", ip_address)
@@ -83,12 +94,16 @@ class SubdomainScanner:
         try:
             socket.gethostbyname(hostname)
             return True
-        except socket.gaierror:
+        except (socket.gaierror, UnicodeEncodeError):
             return False
 
     def scan(self, protocol: str = 'http'):
         subdomains = self.load_wordlist()
-        print(f"{BLUE}[*] Loaded {len(subdomains)} subdomains from wordlist.{RESET}")
+        if not subdomains:
+            print(f"{RED}[!] Error: No valid subdomains loaded from wordlist.{RESET}")
+            return
+            
+        print(f"{BLUE}[*] Loaded {len(subdomains)} clean subdomains from wordlist.{RESET}")
         
         print(f"{YELLOW}[*] Checking for Wildcard DNS...{RESET}")
         if self.check_wildcard():
@@ -127,7 +142,7 @@ class SubdomainScanner:
 
 def main():
     parser = argparse.ArgumentParser(description='SubdomainScan Pro')
-    parser.add_argument('-d', '--domain', required=True, help='Target domain to scan')
+    parser.add_argument('-d', '--domain', required=True, help='Target domain to scan (e.g., vulnweb.com)')
     parser.add_argument('-w', '--wordlist', default='subdomains.txt', help='Path to wordlist')
     parser.add_argument('-t', '--threads', type=int, default=50, help='Number of threads')
     parser.add_argument('--timeout', type=int, default=3, help='Timeout in seconds')
@@ -136,7 +151,10 @@ def main():
     args = parser.parse_args()
     protocol = 'https' if args.https else 'http'
     
-    scanner = SubdomainScanner(args.domain, args.wordlist, args.threads, args.timeout)
+    # Strip any potential accidental spaces or accidental web prefixes from domain parameter
+    clean_domain = args.domain.replace("http://", "").replace("https://", "").split('/')[0]
+    
+    scanner = SubdomainScanner(clean_domain, args.wordlist, args.threads, args.timeout)
     try:
         scanner.scan(protocol=protocol)
     except KeyboardInterrupt:
